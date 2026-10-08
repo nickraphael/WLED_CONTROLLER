@@ -1,0 +1,4 @@
+.pio/
+src/secrets.h
+*.bak
+*.bin
