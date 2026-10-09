@@ -2,3 +2,4 @@
 src/secrets.h
 *.bak
 *.bin
+.venv/

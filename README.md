@@ -5,10 +5,30 @@ up to 8 WLED presets as boxes, lets you cycle through them with the board's BOOT
 button, shows brightness and WLED uptime, and draws a live "peek" of the LED strip
 as a ring around the screen edge.
 
-- Selected preset box: green. Other presets: light blue.
+- Selected preset box: green. Other presets: light blue. Presets that use a sound-reactive effect
+  get a small equalizer icon in their box corner.
+- The PRE box beside the BRI/DUR boxes shows the current preset number, and is green to match the
+  selected box (grey when offline).
 - Fewer than 8 presets in WLED: the spare boxes are hidden.
 - WLED offline: all boxes grey, the button does nothing.
 - One click on BOOT = next preset, applied to WLED immediately.
+- Hold BOOT for 2 seconds = switch to **Brightness mode** (hold again to go back). The PRE box
+  becomes BR: and the 8 boxes become brightness levels: box 1 = 12.5%, each box +12.5%, box 8 = 100%.
+  A click steps to the next level (100% wraps to 12.5%). The selected box (yellow, with lilac for the
+  rest) is the nearest level to the current WLED brightness, and the BR: box shows the real brightness
+  as a whole percent (10% shows as 10 and box 1; the bottom strip keeps the exact figure). The dots
+  turn yellow too. Offline, the button (short or long) does nothing.
+- The board's onboard RGB LED (a WS2812 on GPIO38 per Waveshare's docs) slowly cycles through the
+  rainbow, like the factory firmware. It switches off whenever the screen is dimmed (idle, or WLED power off).
+- After 15 seconds with no button press the backlight dims (only the backlight; polling, the peek ring
+  and the animation keep running). Any button press, or holding the button, brings it back. While
+  WLED power is off the backlight stays at the lower off level regardless.
+- Hold BOOT for 4 seconds = turn WLED power off (sends `{"on":false}`, so the stored brightness is kept).
+  From 2 seconds the bottom strip shows a hint: release to switch mode, keep holding to power off.
+  While off the boxes and the PRE box are dimmed (the box just says OFF), the dots and peek ring stop, the
+  backlight dims, and the bottom strip says the lights are off. A plain click turns the lights back
+  on (a 4 second hold also does). The state follows WLED, so turning the lights off from the app
+  shows up here within a couple of seconds.
 
 ## Hardware
 
@@ -44,8 +64,8 @@ If your machine has no such restriction you can just use PlatformIO directly (`p
 
 ## One-time setup
 
-1. Put this folder somewhere permanent (the examples use `C:\Temp\wled_controller`;
-   adjust paths if you use another location).
+1. Put this folder somewhere permanent. All commands below are run from the project folder
+   (the one containing `platformio.ini`) and use relative paths, so it can live anywhere.
 
 2. Create your private settings file. Copy `src\secrets.h.example` to `src\secrets.h` and edit it
    (it is git-ignored, never commit it):
@@ -66,8 +86,8 @@ If your machine has no such restriction you can just use PlatformIO directly (`p
    `pip.exe`, which is blocked on the managed laptop:
 
    ```
-   python -m venv C:\Temp\venvtest
-   C:\Temp\venvtest\Scripts\python.exe -m pip install esptool
+   python -m venv .venv
+   .venv\Scripts\python.exe -m pip install esptool
    ```
 
 5. Find the board's COM port: plug it in, then check Device Manager > Ports (COM & LPT)
@@ -82,7 +102,7 @@ If your machine has no such restriction you can just use PlatformIO directly (`p
 6. Check the board can be reached (read-only, writes nothing):
 
    ```
-   C:\Temp\venvtest\Scripts\python.exe -m esptool --chip esp32s3 --port COM3 flash-id
+   .venv\Scripts\python.exe -m esptool --chip esp32s3 --port COM3 flash-id
    ```
 
    Expect "ESP32-S3" and "Detected flash size: 16MB".
@@ -90,7 +110,7 @@ If your machine has no such restriction you can just use PlatformIO directly (`p
 7. (Recommended before the first flash) back up the factory firmware, 16MB:
 
    ```
-   C:\Temp\venvtest\Scripts\python.exe -m esptool --chip esp32s3 --port COM3 read-flash 0 0x1000000 C:\Temp\wled_controller\factory_backup.bin
+   .venv\Scripts\python.exe -m esptool --chip esp32s3 --port COM3 read-flash 0 0x1000000 factory_backup.bin
    ```
 
    Restore later with `write-flash 0x0 factory_backup.bin`. Keep a copy outside the project folder.
@@ -106,6 +126,8 @@ before it failed:
 .\merge.cmd
 .\deploy.cmd
 ```
+
+To run all three in one go, use `.\full_deploy.cmd`. It stops at the first step that fails.
 
 - **`build.cmd`**: compiles in a Docker container (first run is slow: it downloads the image,
   PlatformIO, the ESP32 toolchain and the libraries; the `pio_cache` Docker volume keeps the
@@ -131,19 +153,19 @@ PowerShell execution policy on the managed laptop.
 Build:
 
 ```
-docker run --rm -v C:\Temp\wled_controller:/project -v pio_cache:/root/.platformio -w /project python:3.12-slim bash -c "pip install -q platformio && pio run"
+docker run --rm -v ${PWD}:/project -v pio_cache:/root/.platformio -w /project python:3.12-slim bash -c "pip install -q platformio && pio run"
 ```
 
 Merge:
 
 ```
-docker run --rm -v C:\Temp\wled_controller:/project -v pio_cache:/root/.platformio -w /project python:3.12-slim bash -c "pip install -q esptool && python -m esptool --chip esp32s3 merge-bin -o merged.bin --flash-mode dio --flash-size 16MB 0x0 .pio/build/esp32s3/bootloader.bin 0x8000 .pio/build/esp32s3/partitions.bin 0xe000 /root/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin 0x10000 .pio/build/esp32s3/firmware.bin"
+docker run --rm -v ${PWD}:/project -v pio_cache:/root/.platformio -w /project python:3.12-slim bash -c "pip install -q esptool && python -m esptool --chip esp32s3 merge-bin -o merged.bin --flash-mode dio --flash-size 16MB 0x0 .pio/build/esp32s3/bootloader.bin 0x8000 .pio/build/esp32s3/partitions.bin 0xe000 /root/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin 0x10000 .pio/build/esp32s3/firmware.bin"
 ```
 
 Flash:
 
 ```
-C:\Temp\venvtest\Scripts\python.exe -m esptool --chip esp32s3 --port COM3 write-flash 0x0 C:\Temp\wled_controller\merged.bin
+.venv\Scripts\python.exe -m esptool --chip esp32s3 --port COM3 write-flash 0x0 merged.bin
 ```
 
 </details>
@@ -159,11 +181,20 @@ changing anything.
 | `LCD_BRIGHTNESS` | 200 | 0-255 |
 | `RING_THICKNESS` | 3 | Peek ring thickness in pixels |
 | `RING_MODE` | `RING_FULL` | `RING_FULL` = whole border (LEDs 0-388), `RING_BOTTOM_ONLY` = bottom edge only (LEDs 0-124) |
+| `PRE_LABEL_SCALE` | 1.15 | Size of the PRE: label |
+| `LONG_PRESS_MS` | 2000 | Hold time (then release) to switch Preset / Brightness mode |
+| `POWER_PRESS_MS` | 4000 | Hold time to toggle WLED power |
+| `LCD_BRIGHTNESS_OFF` | 6 | Backlight while WLED power is off |
+| `IDLE_DIM_MS` | 15000 | Dim the backlight after this long with no button press (0 = never) |
+| `LCD_BRIGHTNESS_IDLE` | 10 | Backlight level while idle |
+| `ENABLE_RGB_LED`, `RGB_LED_PIN`, `RGB_LED_LEVEL`, `RGB_LED_CYCLE_MS` | 1, 38, 40, 6000 | Onboard RGB LED rainbow: on/off, pin, brightness 0-255, ms per full cycle |
 | `ENABLE_PEEK_RING` | 1 | 0 = no WebSocket and no ring |
+| `ENABLE_AUDIO_MARKER` | 1 | Equalizer icon in the corner of boxes for sound-reactive presets |
+| `LAST_PRESET_SOLID` | 1 | Show the last chosen preset as selected when WLED reports none (0 = outline) |
 | `ENABLE_DOTS` | 1 | 0 = no connector animation (screen only redraws on change) |
 | `DOT_SPACING_PX`, `DOT_MS_PER_PX`, `ANIM_FRAME_MS` | 14, 25, 40 | Dot gap, speed (lower = faster), redraw interval |
 | `STATE_POLL_MS_CFG`, `PRESET_REFRESH_MS_CFG`, `HOLDOFF_MS_CFG`, `PEEK_FRAME_MS` | 2000, 60000, 2500, 60 | Network timings in ms |
-| `COL_SELECTED`, `COL_UNSELECTED`, `COL_DOT`, `COL_OFFLINE_TEXT` | see file | Colours as `R, G, B` |
+| `COL_SELECTED`, `COL_UNSELECTED`, `COL_DOT`, `COL_OFFLINE_TEXT`, `COL_CAPTION`, `COL_SELECTED_BRI`, `COL_UNSELECTED_BRI`, `COL_OFF_SELECTED`, `COL_OFF_UNSELECTED`, `COL_OFF_TEXT` | see file | Colours as `R, G, B` |
 
 Deliberately not configurable: box positions, connector waypoints, the ring's LED ranges and
 `TOTAL_LEDS`. They are tied to `bg.h` and the window layout; changing them without
@@ -180,6 +211,7 @@ regenerating the background just breaks the display.
 | `src/secrets.h` | WiFi credentials and `WLED_HOST` (you create this; git-ignored, never commit it) |
 | `src/secrets.h.example` | Template for `secrets.h` |
 | `build.cmd`, `merge.cmd`, `deploy.cmd` | Build, merge and flash scripts |
+| `full_deploy.cmd` | Runs build, merge and flash in order, stopping on the first failure |
 | `.gitignore` | Ignores `.pio/`, `src/secrets.h`, `*.bak`, `*.bin` |
 | `.pio/` | Build output and downloaded libraries (generated; do not commit) |
 
@@ -189,11 +221,30 @@ resolved to espressif32 7.1.3 (Arduino core 2.0.17).
 
 ## How it works
 
-- **Network task (core 0)** polls `GET /json/si` every 2 seconds for brightness, current
-  preset and uptime, and reloads `GET /presets.json` every 60 seconds (names only,
-  filtered while parsing). The first 8 defined preset IDs (ascending) become boxes 1-8.
-- **Button** applies the next preset with `POST /json/state {"ps": id}`. The polled preset
-  is ignored for 2.5 seconds afterwards so the green box doesn't flicker back.
+- **Network task (core 0)** polls `GET /json/si` every 2 seconds for brightness, power (`on`), current
+  preset and uptime, and reloads `GET /presets.json` every 60 seconds (names and each segment's
+  effect id `fx`, filtered while parsing). The first 8 defined preset IDs (ascending) become boxes 1-8.
+- **Remembered preset**: WLED reports `ps` as -1 or 0 whenever the live state isn't an exact saved
+  preset (after a boot with no boot preset, or after manual changes). The firmware remembers the
+  last preset chosen (button click, or WLED reporting one) in flash (`Preferences`, namespace
+  `wledctl`) and, when WLED reports none, shows that box as selected (`LAST_PRESET_SOLID 1`, the default, so a
+  brightness change doesn't look like the preset was deselected). With `LAST_PRESET_SOLID 0` it is
+  drawn with a green outline and "(modified)" is added to the name instead. The next click continues
+  from that box. The trade-off: if the state was changed some other way (e.g. colours in the app),
+  the last preset still shows as selected.
+- **Sound-reactive marker**: at boot the firmware fetches `GET /json/fxdata` (one metadata string per
+  effect id, `sliders;colors;palette;flags;defaults`) and records which effects have `v` or `f` in
+  the flags field (volume / frequency reactive). Each preset's segment `fx` ids are checked against
+  that table, and every box whose preset has a sound-reactive effect in any segment shows a small
+  equalizer icon in its top-right corner (black on the selected box, white on the others; hidden in
+  Brightness mode and while the lights are off). Limits: a playlist preset (no `seg`) is not
+  followed, and the marker says the effect *can* react to sound, not that the AudioReactive usermod is enabled.
+- **Button**: a short press is acted on at release (so a long press cannot also fire a click). It applies
+  the next preset with `POST /json/state {"ps": id}`; a 4 second hold sends `{"on":true/false}`. The
+  polled preset, brightness and power state are ignored for 2.5 seconds afterwards so the green box doesn't flicker back. In Brightness mode it
+  sends `POST /json/state {"bri": n}` (32, 64, 96, 128, 159, 191, 223, 255) with the same holdoff.
+  The PRESET/PRE: and BRIGHT/BR: texts are drawn in code over the background, so the background
+  image can have those labels removed or left in.
 - **Peek ring**: WLED's HTTP `/json/live` is not enabled on this controller (returns
   `{"error":4}`), so the firmware uses the WebSocket live view like the WLED app does:
   connect to `ws://<ip>/ws`, send `{"lv":true}`, and receive binary frames
@@ -204,8 +255,8 @@ resolved to espressif32 7.1.3 (Arduino core 2.0.17).
   top edge right to left = 195-319, left edge top to bottom = 320-388.
   In `RING_BOTTOM_ONLY` mode only the bottom edge is drawn.
   Reversed segments need no correction: the frame holds the colour of each physical LED.
-- **Connector animation**: while a preset is selected, green dots flow from the PRE box down the
-  connector line to the selected box (hard-coded waypoints in `drawDotsToBox`). The screen
+- **Connector animation**: while a preset is selected (and the lights are on), green dots flow from the PRE box down the
+  connector line to the selected box (yellow in Brightness mode; hard-coded waypoints in `drawDotsToBox`). The screen
   redraws at about 25fps in that state; offline it only redraws on change.
 - **Rendering**: the whole screen is drawn into a 320x172 sprite (static background image
   first, then dynamic elements) and pushed to the display, so there is no flicker.
@@ -232,7 +283,8 @@ background). That edit was applied to the image before conversion; if you regene
 the original PNG you need to repeat it, or save the edited PNG as the new source.
 
 UI element positions are measured from the mockup and live in `main.cpp`
-(box x positions and widths, value text centres).
+(box x positions and widths, value text centres). The PRE/BRI box and the PRESET/BRIGHT caption
+are repainted over the background in code, so the image's own copies of them don't matter.
 
 ## Troubleshooting
 
@@ -246,6 +298,8 @@ UI element positions are measured from the mockup and live in `main.cpp`
 | Peek ring wrong or blank | Frame format changed (WLED version), or sample buffer too small (`PEEK_MAX` must be at least the LED count) |
 | esptool "Failed to connect" | Hold BOOT, tap RESET, release BOOT; close serial monitors |
 | `python -m serial.tools.miniterm` crashes with ClearCommError | Windows quirk with the S3's native USB; the chip resets and the port drops. Use on-screen status instead |
+| Brightness jumps back to about 10% on every preset click | The presets have a saved brightness. In WLED edit each preset, untick "Include brightness" and save (or remove the top-level `"bri"` from `presets.json`) |
+| No box selected after a reboot | WLED reports `ps` -1 after a brightness change or boot. The firmware shows the last chosen preset (kept in flash) as selected; click once to set it. See `LAST_PRESET_SOLID` |
 | `docker: error during connect ... dockerDesktopLinuxEngine` | Docker Desktop is not running. Start it and wait for the engine, check `docker info` |
 | `pip.exe` / `gcc.exe` "Access is denied" | Managed-laptop policy blocks unsigned executables; use the Docker workflow |
 

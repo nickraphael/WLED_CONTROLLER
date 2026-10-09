@@ -2,7 +2,8 @@
 setlocal
 cd /d "%~dp0"
 rem ---- edit these if your setup differs ----
-set PYTHON=C:\Temp\venvtest\Scripts\python.exe
+set PYTHON=.venv\Scripts\python.exe
+if not exist "%PYTHON%" set PYTHON=C:\Temp\venvtest\Scripts\python.exe
 set PORT=COM3
 rem ------------------------------------------
 echo === DEPLOY ===
