@@ -124,6 +124,7 @@ static SemaphoreHandle_t mtx;
 static volatile int pendingPreset = -1;  // preset id the UI wants applied
 static volatile int pendingBri = -1;     // brightness (0-255) the UI wants applied
 static volatile int pendingPower = -1;   // 1 = on, 0 = off, -1 = nothing
+static volatile bool peekWanted = true;  // false while the screen is dimmed: websocket closed, ring hidden
 static volatile uint32_t holdoffUntil = 0;
 static volatile int dbgHttp = 0;  // last HTTP result code (debug)
 
@@ -452,11 +453,20 @@ static void netTask(void*) {
       pollState();
     }
 
-    if (ENABLE_PEEK_RING && !wsStarted) {
+    bool wantPeek = ENABLE_PEEK_RING && peekWanted;
+    if (wantPeek && !wsStarted) {
       ws.begin(WLED_HOST, 80, "/ws");
       ws.onEvent(wsEvent);
       ws.setReconnectInterval(3000);
       wsStarted = true;
+    }
+    if (!wantPeek && wsStarted) {  // screen dimmed: close the websocket and drop the ring
+      ws.disconnect();
+      wsStarted = false;  // ws.loop() is no longer called, so it won't auto-reconnect
+      lock();
+      S.peekCount = 0;
+      S.version++;
+      unlock();
     }
     if (wsStarted) ws.loop();
 
@@ -926,6 +936,7 @@ void loop() {
       lastBacklight = bl;
     }
     updateRgbLed(!off && !idle, now);  // rainbow only while the screen is fully bright
+    peekWanted = !off && !idle;        // same for the live peek (websocket + ring)
   }
   if (changed || (ENABLE_DOTS && hasSelection(snap) && now - lastFrame >= ANIM_FRAME_MS)) {
     lastFrame = now;

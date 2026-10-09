@@ -23,7 +23,7 @@
 #define PRE_LABEL_SCALE     1.15f // size of the "PRE:" label (1.0 = normal)
 #define ENABLE_RGB_LED      1     // onboard RGB LED cycles through the rainbow (off while the screen is dimmed)
 #define RGB_LED_PIN         38    // Waveshare ESP32-S3-LCD-1.47: WS2812 on GPIO38 (unconfirmed on your board)
-#define RGB_LED_LEVEL       40    // brightness scale 0-255 (the LED is very bright)
+#define RGB_LED_LEVEL       100   // brightness scale 0-255 (the LED is very bright)
 #define RGB_LED_CYCLE_MS    6000  // time for one full trip round the rainbow
 #define ENABLE_PEEK_RING    1     // 0 = no WebSocket, no ring
 #define ENABLE_AUDIO_MARKER 1     // equalizer icon in the corner of boxes for sound-reactive presets

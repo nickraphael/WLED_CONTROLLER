@@ -20,6 +20,8 @@ as a ring around the screen edge.
   turn yellow too. Offline, the button (short or long) does nothing.
 - The board's onboard RGB LED (a WS2812 on GPIO38 per Waveshare's docs) slowly cycles through the
   rainbow, like the factory firmware. It switches off whenever the screen is dimmed (idle, or WLED power off).
+- While the screen is dimmed (idle, or WLED power off) the peek WebSocket is closed and the ring is
+  hidden; the next button press reconnects it (a fraction of a second to reappear).
 - After 15 seconds with no button press the backlight dims (only the backlight; polling, the peek ring
   and the animation keep running). Any button press, or holding the button, brings it back. While
   WLED power is off the backlight stays at the lower off level regardless.
@@ -187,8 +189,8 @@ changing anything.
 | `LCD_BRIGHTNESS_OFF` | 6 | Backlight while WLED power is off |
 | `IDLE_DIM_MS` | 15000 | Dim the backlight after this long with no button press (0 = never) |
 | `LCD_BRIGHTNESS_IDLE` | 10 | Backlight level while idle |
-| `ENABLE_RGB_LED`, `RGB_LED_PIN`, `RGB_LED_LEVEL`, `RGB_LED_CYCLE_MS` | 1, 38, 40, 6000 | Onboard RGB LED rainbow: on/off, pin, brightness 0-255, ms per full cycle |
-| `ENABLE_PEEK_RING` | 1 | 0 = no WebSocket and no ring |
+| `ENABLE_RGB_LED`, `RGB_LED_PIN`, `RGB_LED_LEVEL`, `RGB_LED_CYCLE_MS` | 1, 38, 100, 6000 | Onboard RGB LED rainbow: on/off, pin, brightness 0-255, ms per full cycle |
+| `ENABLE_PEEK_RING` | 1 | 0 = no WebSocket and no ring (it is also closed while the screen is dimmed) |
 | `ENABLE_AUDIO_MARKER` | 1 | Equalizer icon in the corner of boxes for sound-reactive presets |
 | `LAST_PRESET_SOLID` | 1 | Show the last chosen preset as selected when WLED reports none (0 = outline) |
 | `ENABLE_DOTS` | 1 | 0 = no connector animation (screen only redraws on change) |
