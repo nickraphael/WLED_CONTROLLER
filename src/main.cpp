@@ -105,6 +105,7 @@ struct Shared {
   bool online = false;
   int bri = 0;  // 0-255
   uint32_t uptime = 0;  // seconds
+  uint32_t uptimeAt = 0;  // millis() when uptime was sampled (the UI counts on from there)
   int ps = -1;  // current preset id, -1 = none
   int mode = 0;  // UiMode: what the button and boxes control
   bool on = true;  // WLED power state (state.on)
@@ -124,7 +125,7 @@ static SemaphoreHandle_t mtx;
 static volatile int pendingPreset = -1;  // preset id the UI wants applied
 static volatile int pendingBri = -1;     // brightness (0-255) the UI wants applied
 static volatile int pendingPower = -1;   // 1 = on, 0 = off, -1 = nothing
-static volatile bool peekWanted = true;  // false while the screen is dimmed: websocket closed, ring hidden
+static volatile bool peekWanted = true;  // false while the screen is dimmed or WLED is off: live view stopped, ring hidden
 static volatile uint32_t holdoffUntil = 0;
 static volatile int dbgHttp = 0;  // last HTTP result code (debug)
 
@@ -142,27 +143,18 @@ static void savePs(int id) {
   }
 }
 
-// ---- Brightness levels: box k (0-7) = (k+1)/8 of full, i.e. 12.5% .. 100% ----
+// ---- Brightness levels: box k (0-7) = BRI_LEVEL_LIST[k] (raw WLED bri 1-255, see config.h) ----
+static const int BRI_TABLE[] = {BRI_LEVEL_LIST};
 static const int BRI_LEVELS = MAX_PRESETS;  // one box per level
-static int briForLevel(int k) { return (255 * (k + 1) + BRI_LEVELS / 2) / BRI_LEVELS; }
-static String briPercentText(int k) {
-  float pct = 100.0f * (k + 1) / BRI_LEVELS;
-  return String(pct, (k + 1) * 100 % BRI_LEVELS == 0 ? 0 : 1);
-}
-// Text for a raw brightness: the exact level text (12.5, 25, 37.5 ...) when it sits on a level,
-// otherwise the rounded percentage (e.g. bri 26 -> "10").
-static String briDisplayText(int bri) {
-  for (int k = 0; k < BRI_LEVELS; k++)
-    if (briForLevel(k) == bri) return briPercentText(k);
-  return String((bri * 100 + 127) / 255);
-}
-// Whole-number percent for the small boxes. Exact levels round half up (12.5 -> 13, 87.5 -> 88),
-// so the header agrees with the level the user stepped to.
+static_assert(sizeof(BRI_TABLE) / sizeof(BRI_TABLE[0]) == MAX_PRESETS, "BRI_LEVEL_LIST needs exactly 8 values");
+static int briForLevel(int k) { return BRI_TABLE[k]; }
+// Whole-number percent of a raw brightness. Never shows 0 while the strip is lit (bri 1 = 0.4% -> "1").
 static String briRoundedText(int bri) {
-  for (int k = 0; k < BRI_LEVELS; k++)
-    if (briForLevel(k) == bri) return String((100 * (k + 1) + BRI_LEVELS / 2) / BRI_LEVELS);
-  return String((bri * 100 + 127) / 255);
+  int pct = (bri * 100 + 127) / 255;
+  if (bri > 0 && pct < 1) pct = 1;
+  return String(pct);
 }
+static String briDisplayText(int bri) { return briRoundedText(bri); }
 // Nearest level to a raw brightness, -1 when WLED is at 0 (so a click goes to the first level).
 static int levelForBri(int bri) {
   if (bri <= 0) return -1;
@@ -210,6 +202,56 @@ static void setOffline() {
   unlock();
 }
 
+// Consecutive failed polls; WLED is only shown as offline after OFFLINE_AFTER_FAILS of them.
+static int pollFails = 0;
+
+// Applies a WLED state document (from /json/si or a websocket push). Fields that are absent are left
+// alone, so a partial push can't reset anything.
+static void applyState(JsonDocument& doc) {
+  bool hasBri = doc["state"]["bri"].is<int>();
+  bool hasPs = doc["state"]["ps"].is<int>();
+  bool hasOn = doc["state"]["on"].is<bool>();
+  bool hasUp = doc["info"]["uptime"].is<uint32_t>();
+  int bri = doc["state"]["bri"] | 0;
+  int ps = doc["state"]["ps"] | -1;
+  bool on = doc["state"]["on"] | true;
+  uint32_t uptime = doc["info"]["uptime"] | 0;
+
+  int saveId = -1;
+  lock();
+  bool changed = false;
+  bool holding = (int32_t)(holdoffUntil - millis()) > 0;
+  if (hasPs && !holding && S.ps != ps) {
+    S.ps = ps;
+    changed = true;
+    if (ps > 0 && S.lastPs != ps) {
+      S.lastPs = ps;
+      saveId = ps;
+    }
+  }
+  if (hasOn && !holding && S.on != on) {
+    S.on = on;
+    if (!on) S.mode = MODE_PRESET;
+    changed = true;
+  }
+  if (hasBri && !holding && S.bri != bri) {
+    S.bri = bri;
+    changed = true;
+  }
+  if (hasUp) {  // no redraw for this: the UI counts uptime on from uptimeAt
+    S.uptime = uptime;
+    S.uptimeAt = millis();
+  }
+  if (!S.online) {
+    Serial.println("WLED online");
+    S.online = true;
+    changed = true;
+  }
+  if (changed) S.version++;
+  unlock();
+  if (saveId > 0) savePs(saveId);
+}
+
 static bool pollState() {
   JsonDocument filter;
   filter["state"]["bri"] = true;
@@ -219,41 +261,11 @@ static bool pollState() {
 
   JsonDocument doc;
   if (!httpGetJson("/json/si", doc, filter)) {
-    setOffline();
+    if (++pollFails >= OFFLINE_AFTER_FAILS) setOffline();  // one bad request is not "offline"
     return false;
   }
-  int bri = doc["state"]["bri"] | 0;
-  int ps = doc["state"]["ps"] | -1;
-  bool on = doc["state"]["on"] | true;
-  uint32_t uptime = doc["info"]["uptime"] | 0;
-
-  int saveId = -1;
-  lock();
-  bool changed = !S.online || S.uptime != uptime;
-  bool holding = (int32_t)(holdoffUntil - millis()) > 0;
-  if (!holding && S.ps != ps) {
-    S.ps = ps;
-    changed = true;
-    if (ps > 0 && S.lastPs != ps) {
-      S.lastPs = ps;
-      saveId = ps;
-    }
-  }
-  if (!holding && S.on != on) {
-    S.on = on;
-    if (!on) S.mode = MODE_PRESET;
-    changed = true;
-  }
-  if (!holding && S.bri != bri) {
-    S.bri = bri;
-    changed = true;
-  }
-  if (!S.online) Serial.println("WLED online");
-  S.online = true;
-  S.uptime = uptime;
-  if (changed) S.version++;
-  unlock();
-  if (saveId > 0) savePs(saveId);
+  pollFails = 0;
+  applyState(doc);
   return true;
 }
 
@@ -352,24 +364,43 @@ static void sendPreset(int id) { sendState(String("{\"ps\":") + id + "}"); }
 static void sendPower(bool on) { sendState(on ? String("{\"on\":true}") : String("{\"on\":false}")); }
 static void sendBri(int bri) { sendState(String("{\"bri\":") + bri + "}"); }
 
-// WLED live view ("peek") over WebSocket: send {"lv":true}, receive binary frames
-// 'L', version(1), then RGB triplets for the strip (WLED subsamples to <=256 LEDs).
+// WebSocket to WLED. While it is up WLED pushes every state change, so HTTP polling only needs to run
+// slowly (safety net + uptime). {"lv":true} additionally streams the LED colours for the peek ring:
+// binary frames 'L', version(1), then RGB triplets (WLED subsamples to <=256 LEDs).
 static WebSocketsClient ws;
 static uint32_t lastPeekMs = 0;
+static volatile bool wsConnected = false;
+static bool lvOn = false;  // live view currently requested from WLED
 
 static void wsEvent(WStype_t type, uint8_t* payload, size_t length) {
   switch (type) {
     case WStype_CONNECTED:
-      ws.sendTXT("{\"lv\":true}");
+      wsConnected = true;
+      lvOn = false;  // netTask asks for live view when the screen is bright
       Serial.println("WS connected");
       break;
     case WStype_DISCONNECTED:
+      wsConnected = false;
+      lvOn = false;
       lock();
-      S.peekCount = 0;
-      S.version++;
+      if (S.peekCount != 0) {
+        S.peekCount = 0;
+        S.version++;
+      }
       unlock();
       break;
+    case WStype_TEXT: {  // state push: {"state":{...},"info":{...}}
+      JsonDocument filter;
+      filter["state"]["bri"] = true;
+      filter["state"]["ps"] = true;
+      filter["state"]["on"] = true;
+      filter["info"]["uptime"] = true;
+      JsonDocument doc;
+      if (!deserializeJson(doc, (const char*)payload, length, DeserializationOption::Filter(filter))) applyState(doc);
+      break;
+    }
     case WStype_BIN: {
+      if (!lvOn) break;  // stray frame after live view was switched off
       if (length < 5 || payload[0] != 'L' || payload[1] != 1) break;  // 1D frames only
       uint32_t now = millis();
       if (now - lastPeekMs < PEEK_FRAME_MS) break;  // ~15 fps is plenty
@@ -391,18 +422,45 @@ static void wsEvent(WStype_t type, uint8_t* payload, size_t length) {
   }
 }
 
+// Retry delays for the heavy fetches (fxdata, presets): 5s, 10s, 30s, then every 60s.
+struct Backoff {
+  uint32_t nextAt = 0;  // 0 = due now
+  int fails = 0;
+  bool due(uint32_t now) const { return nextAt == 0 || (int32_t)(now - nextAt) >= 0; }
+  void ok() { fails = 0; nextAt = 0; }
+  void fail(uint32_t now) {
+    static const uint32_t step[] = {5000, 10000, 30000, 60000};
+    nextAt = now + step[fails < 3 ? fails : 3];
+    if (nextAt == 0) nextAt = 1;
+    fails++;
+  }
+};
+static const int FX_MAX_TRIES = 3;  // then give up on audio markers until the next boot
+
 static void netTask(void*) {
-  uint32_t lastPresetOk = 0, lastPresetTry = 0, lastState = 0, lastWifiTry = 0;
+  Backoff fxB, presetB;
+  uint32_t lastPresetOk = 0, lastState = 0, lastWifiTry = 0, forcePollAt = 0;
   bool havePresets = false;
   bool haveFx = false;
-  uint32_t lastFxTry = 0;
+  bool fxGaveUp = false;
+  bool wasOnline = false;
   bool wsStarted = false;
+  uint32_t onSince = 0;  // millis() when the lights were first seen on (auto power-off timer), 0 = not running
 
   for (;;) {
     uint32_t now = millis();
 
     if (WiFi.status() != WL_CONNECTED) {
       setOffline();
+      if (wsStarted) {
+        ws.disconnect();
+        wsStarted = false;
+        wsConnected = false;
+        lvOn = false;
+      }
+      pollFails = 0;
+      wasOnline = false;
+      onSince = 0;
       if (now - lastWifiTry > 15000) {
         lastWifiTry = now;
         WiFi.disconnect();
@@ -416,59 +474,119 @@ static void netTask(void*) {
     if (id >= 0) {
       pendingPreset = -1;
       sendPreset(id);
-      lastState = 0;  // re-poll straight away
+      forcePollAt = millis() + HOLDOFF_MS + 100;  // verify once the holdoff has expired
     }
     int pw = pendingPower;
     if (pw >= 0) {
       pendingPower = -1;
       sendPower(pw == 1);
-      lastState = 0;
+      forcePollAt = millis() + HOLDOFF_MS + 100;
     }
     int b = pendingBri;
     if (b >= 0) {
       pendingBri = -1;
       sendBri(b);
-      lastState = 0;
+      forcePollAt = millis() + HOLDOFF_MS + 100;
     }
 
-    if (!haveFx && (lastFxTry == 0 || now - lastFxTry > 5000)) {
-      lastFxTry = now;
-      if (fetchFxData()) {
-        haveFx = true;
-        havePresets = false;  // re-read presets so the audio flags are filled in
-      }
-    }
-
-    bool needPresets = !havePresets || (now - lastPresetOk > PRESET_REFRESH_MS);
-    if (needPresets && (now - lastPresetTry > 5000 || lastPresetTry == 0)) {
-      lastPresetTry = now;
-      if (fetchPresets()) {
-        havePresets = true;
-        lastPresetOk = millis();
-      }
-    }
-
-    if (now - lastState >= STATE_POLL_MS || lastState == 0) {
+    // State poll: slow while the websocket is up and healthy (WLED pushes changes), fast otherwise.
+    uint32_t pollEvery = (wsConnected && pollFails == 0) ? STATE_POLL_SLOW_MS : STATE_POLL_MS;
+    bool forced = forcePollAt != 0 && (int32_t)(now - forcePollAt) >= 0;
+    if (lastState == 0 || now - lastState >= pollEvery || forced) {
       lastState = now;
+      if (forced) forcePollAt = 0;
       pollState();
     }
 
-    bool wantPeek = ENABLE_PEEK_RING && peekWanted;
-    if (wantPeek && !wsStarted) {
+    bool online, isOn;
+    lock();
+    online = S.online;
+    isOn = S.on;
+    unlock();
+
+    // Auto power-off: lights on for AUTO_OFF_MS in a row -> send power off. The timer is not reset by
+    // button presses; it restarts when WLED is seen off or unreachable (or this board reboots).
+    if (AUTO_OFF_MS > 0) {
+      uint32_t t = millis();
+      if (online && isOn) {
+        if (onSince == 0) {
+          onSince = t ? t : 1;
+        } else if (t - onSince >= (uint32_t)AUTO_OFF_MS) {
+          Serial.println("Auto power-off: lights have been on too long");
+          sendPower(false);
+          forcePollAt = millis() + 500;                   // check it took
+          onSince = millis() - (uint32_t)AUTO_OFF_MS + 15000;  // still on in 15s? try again
+        }
+      } else {
+        onSince = 0;
+      }
+    }
+
+    if (online && !wasOnline) {  // (re)connected: forget old failures so the fetches go straight away
+      presetB = Backoff();
+      if (!haveFx && !fxGaveUp) fxB = Backoff();
+    }
+    wasOnline = online;
+
+    // Heavy fetches only while WLED is reachable, with backoff when they fail.
+    if (online) {
+      now = millis();
+      if (!haveFx && !fxGaveUp && fxB.due(now)) {
+        if (fetchFxData()) {
+          haveFx = true;
+          fxB.ok();
+          havePresets = false;  // re-read presets so the audio flags are filled in
+        } else {
+          fxB.fail(millis());
+          if (fxB.fails >= FX_MAX_TRIES) {
+            fxGaveUp = true;
+            Serial.println("fxdata: giving up (no audio markers until reboot)");
+          }
+        }
+      }
+      now = millis();
+      bool needPresets = !havePresets || (now - lastPresetOk > PRESET_REFRESH_MS);
+      if (needPresets && presetB.due(now)) {
+        if (fetchPresets()) {
+          havePresets = true;
+          lastPresetOk = millis();
+          presetB.ok();
+        } else {
+          presetB.fail(millis());
+        }
+      }
+    }
+
+    // WebSocket: open while WLED is reachable, closed (no reconnect storm) while it is not.
+    if (online && !wsStarted) {
       ws.begin(WLED_HOST, 80, "/ws");
       ws.onEvent(wsEvent);
-      ws.setReconnectInterval(3000);
+      ws.setReconnectInterval(5000);
+      ws.enableHeartbeat(15000, 3000, 2);  // notice a dead WLED without waiting for TCP
       wsStarted = true;
     }
-    if (!wantPeek && wsStarted) {  // screen dimmed: close the websocket and drop the ring
+    if (!online && wsStarted) {
       ws.disconnect();
-      wsStarted = false;  // ws.loop() is no longer called, so it won't auto-reconnect
-      lock();
-      S.peekCount = 0;
-      S.version++;
-      unlock();
+      wsStarted = false;
+      wsConnected = false;
+      lvOn = false;
     }
     if (wsStarted) ws.loop();
+
+    // Live view (peek ring) only while the screen is bright and WLED is on.
+    bool wantLv = ENABLE_PEEK_RING && peekWanted;
+    if (wsStarted && wsConnected && wantLv != lvOn) {
+      ws.sendTXT(wantLv ? "{\"lv\":true}" : "{\"lv\":false}");
+      lvOn = wantLv;
+      if (!wantLv) {
+        lock();
+        if (S.peekCount != 0) {
+          S.peekCount = 0;
+          S.version++;
+        }
+        unlock();
+      }
+    }
 
     vTaskDelay(pdMS_TO_TICKS(10));
   }
@@ -588,7 +706,7 @@ static void drawUI(const Shared& d, uint32_t now) {
   spr.setFont(&fonts::FreeSansBold9pt7b);
   spr.setTextColor(TFT_WHITE);
   String bri = d.online ? briRoundedText(d.bri) + "%" : String("--");
-  String dur = d.online ? fmtUptime(d.uptime) : String("--");
+  String dur = d.online ? fmtUptime(d.uptime + (((int32_t)(now - d.uptimeAt) > 0) ? (now - d.uptimeAt) / 1000 : 0)) : String("--");
   spr.drawString(bri, 198, 22);
   spr.drawString(dur, 198, 55);
 
@@ -938,7 +1056,8 @@ void loop() {
     updateRgbLed(!off && !idle, now);  // rainbow only while the screen is fully bright
     peekWanted = !off && !idle;        // same for the live peek (websocket + ring)
   }
-  if (changed || (ENABLE_DOTS && hasSelection(snap) && now - lastFrame >= ANIM_FRAME_MS)) {
+  if (changed || (ENABLE_DOTS && hasSelection(snap) && now - lastFrame >= ANIM_FRAME_MS) ||
+      (snap.online && now - lastFrame >= 1000)) {  // 1s: keeps the DUR box counting
     lastFrame = now;
     drawUI(snap, now);
   }

@@ -13,15 +13,16 @@ as a ring around the screen edge.
 - WLED offline: all boxes grey, the button does nothing.
 - One click on BOOT = next preset, applied to WLED immediately.
 - Hold BOOT for 2 seconds = switch to **Brightness mode** (hold again to go back). The PRE box
-  becomes BR: and the 8 boxes become brightness levels: box 1 = 12.5%, each box +12.5%, box 8 = 100%.
-  A click steps to the next level (100% wraps to 12.5%). The selected box (yellow, with lilac for the
+  becomes BR: and the 8 boxes become brightness levels: the boxes step through 8 raw levels (`BRI_LEVEL_LIST`, default 1, 3, 6, 12, 25, 45, 100, 255 out of 255, i.e. about 1%, 1%, 2%, 5%, 10%, 18%, 39%, 100%).
+  A click steps to the next level (the top level wraps to the lowest). The selected box (yellow, with lilac for the
   rest) is the nearest level to the current WLED brightness, and the BR: box shows the real brightness
-  as a whole percent (10% shows as 10 and box 1; the bottom strip keeps the exact figure). The dots
+  as a whole percent (25/255 shows as 10 and box 5; level 1 shows as 1, never 0). The dots
   turn yellow too. Offline, the button (short or long) does nothing.
 - The board's onboard RGB LED (a WS2812 on GPIO38 per Waveshare's docs) slowly cycles through the
   rainbow, like the factory firmware. It switches off whenever the screen is dimmed (idle, or WLED power off).
-- While the screen is dimmed (idle, or WLED power off) the peek WebSocket is closed and the ring is
-  hidden; the next button press reconnects it (a fraction of a second to reappear).
+- While the screen is dimmed (idle, or WLED power off) the live view is switched off and the ring is
+  hidden; the next button press switches it back on (a fraction of a second to reappear). The WebSocket
+  itself stays open, because WLED uses it to push state changes.
 - After 15 seconds with no button press the backlight dims (only the backlight; polling, the peek ring
   and the animation keep running). Any button press, or holding the button, brings it back. While
   WLED power is off the backlight stays at the lower off level regardless.
@@ -31,6 +32,10 @@ as a ring around the screen edge.
   backlight dims, and the bottom strip says the lights are off. A plain click turns the lights back
   on (a 4 second hold also does). The state follows WLED, so turning the lights off from the app
   shows up here within a couple of seconds.
+- **Auto power-off**: once WLED has been on for 3 hours in a row (`AUTO_OFF_MS`) the controller sends
+  `{"on":false}`, and retries 15 seconds later if WLED is still on. The timer is not reset by button presses;
+  it restarts when WLED is seen off or unreachable, or when the controller reboots. Click the button to turn
+  the lights back on. `AUTO_OFF_MS 0` disables it.
 
 ## Hardware
 
@@ -133,7 +138,10 @@ To run all three in one go, use `.\full_deploy.cmd`. It stops at the first step 
 
 - **`build.cmd`**: compiles in a Docker container (first run is slow: it downloads the image,
   PlatformIO, the ESP32 toolchain and the libraries; the `pio_cache` Docker volume keeps the
-  toolchain for next time). Check the output ends in `[SUCCESS]`.
+  toolchain for next time). The libraries and build output live in a second Docker volume,
+  `pio_work`, because scanning thousands of library files across the Windows bind mount made every
+  build slow; the three `.bin` files are copied back to `.pio/build/esp32s3/` after a good build.
+  To force a clean rebuild: `docker volume rm pio_work`. Check the output ends in `[SUCCESS]`.
 - **`merge.cmd`**: deletes the old `merged.bin`, then merges bootloader, partition table and app
   into one image, and checks the new file exists.
 - **`deploy.cmd`**: refuses to flash if `merged.bin` is older than `firmware.bin`, then flashes
@@ -155,7 +163,7 @@ PowerShell execution policy on the managed laptop.
 Build:
 
 ```
-docker run --rm -v ${PWD}:/project -v pio_cache:/root/.platformio -w /project python:3.12-slim bash -c "pip install -q platformio && pio run"
+docker run --rm -v ${PWD}:/project -v pio_cache:/root/.platformio -v pio_work:/pio_work -e PLATFORMIO_WORKSPACE_DIR=/pio_work -e PIP_CACHE_DIR=/root/.platformio/pipcache -w /project python:3.12-slim bash -c "pip install -q platformio && pio run && mkdir -p .pio/build/esp32s3 && cp /pio_work/build/esp32s3/firmware.bin /pio_work/build/esp32s3/bootloader.bin /pio_work/build/esp32s3/partitions.bin .pio/build/esp32s3/"
 ```
 
 Merge:
@@ -190,12 +198,15 @@ changing anything.
 | `IDLE_DIM_MS` | 15000 | Dim the backlight after this long with no button press (0 = never) |
 | `LCD_BRIGHTNESS_IDLE` | 10 | Backlight level while idle |
 | `ENABLE_RGB_LED`, `RGB_LED_PIN`, `RGB_LED_LEVEL`, `RGB_LED_CYCLE_MS` | 1, 38, 100, 6000 | Onboard RGB LED rainbow: on/off, pin, brightness 0-255, ms per full cycle |
-| `ENABLE_PEEK_RING` | 1 | 0 = no WebSocket and no ring (it is also closed while the screen is dimmed) |
+| `ENABLE_PEEK_RING` | 1 | 0 = no live view and no ring (the WebSocket still carries state pushes; live view is also off while the screen is dimmed) |
 | `ENABLE_AUDIO_MARKER` | 1 | Equalizer icon in the corner of boxes for sound-reactive presets |
+| `BRI_LEVEL_LIST` | 1, 3, 6, 12, 25, 45, 100, 255 | The 8 brightness-mode levels, raw WLED brightness 1-255 (exactly 8, ascending) |
 | `LAST_PRESET_SOLID` | 1 | Show the last chosen preset as selected when WLED reports none (0 = outline) |
 | `ENABLE_DOTS` | 1 | 0 = no connector animation (screen only redraws on change) |
 | `DOT_SPACING_PX`, `DOT_MS_PER_PX`, `ANIM_FRAME_MS` | 14, 25, 40 | Dot gap, speed (lower = faster), redraw interval |
-| `STATE_POLL_MS_CFG`, `PRESET_REFRESH_MS_CFG`, `HOLDOFF_MS_CFG`, `PEEK_FRAME_MS` | 2000, 60000, 2500, 60 | Network timings in ms |
+| `STATE_POLL_MS_CFG`, `STATE_POLL_SLOW_MS`, `PRESET_REFRESH_MS_CFG`, `HOLDOFF_MS_CFG`, `PEEK_FRAME_MS` | 2000, 10000, 60000, 2500, 60 | Network timings in ms. The state poll runs at `STATE_POLL_MS_CFG` while the WebSocket is down or a poll just failed, and at `STATE_POLL_SLOW_MS` while it is up |
+| `AUTO_OFF_MS` | 10800000 (3h) | Send WLED power off after it has been on this long in a row (0 = never). Counts from when the controller first sees it on; restarts if WLED goes off or unreachable or the controller reboots; button presses don't reset it |
+| `OFFLINE_AFTER_FAILS` | 3 | Failed state polls in a row before the screen shows WLED offline (one dropped request no longer flips the UI) |
 | `COL_SELECTED`, `COL_UNSELECTED`, `COL_DOT`, `COL_OFFLINE_TEXT`, `COL_CAPTION`, `COL_SELECTED_BRI`, `COL_UNSELECTED_BRI`, `COL_OFF_SELECTED`, `COL_OFF_UNSELECTED`, `COL_OFF_TEXT` | see file | Colours as `R, G, B` |
 
 Deliberately not configurable: box positions, connector waypoints, the ring's LED ranges and
@@ -207,7 +218,7 @@ regenerating the background just breaks the display.
 | File | Purpose |
 |---|---|
 | `platformio.ini` | Board, framework, 16MB partitions, USB CDC flags, libraries |
-| `src/main.cpp` | Everything: display, WiFi, WLED polling, WebSocket peek, button, UI |
+| `src/main.cpp` | Everything: display, WiFi, WLED polling, WebSocket state push and peek, button, UI |
 | `src/config.h` | Tunable settings (committed) |
 | `src/bg.h` | The 320x172 background image as a C array (generated, see below) |
 | `src/secrets.h` | WiFi credentials and `WLED_HOST` (you create this; git-ignored, never commit it) |
@@ -215,7 +226,7 @@ regenerating the background just breaks the display.
 | `build.cmd`, `merge.cmd`, `deploy.cmd` | Build, merge and flash scripts |
 | `full_deploy.cmd` | Runs build, merge and flash in order, stopping on the first failure |
 | `.gitignore` | Ignores `.pio/`, `src/secrets.h`, `*.bak`, `*.bin` |
-| `.pio/` | Build output and downloaded libraries (generated; do not commit) |
+| `.pio/` | Generated; holds the three `.bin` files copied from the build (libraries and build output live in the `pio_work` Docker volume). Do not commit |
 
 Libraries (resolved at build time, see `platformio.ini`): LovyanGFX, ArduinoJson 7,
 links2004/WebSockets. Platform `espressif32` is not pinned. When this was last built it
@@ -223,9 +234,14 @@ resolved to espressif32 7.1.3 (Arduino core 2.0.17).
 
 ## How it works
 
-- **Network task (core 0)** polls `GET /json/si` every 2 seconds for brightness, power (`on`), current
-  preset and uptime, and reloads `GET /presets.json` every 60 seconds (names and each segment's
-  effect id `fx`, filtered while parsing). The first 8 defined preset IDs (ascending) become boxes 1-8.
+- **Network task (core 0)** keeps a WebSocket open to WLED, which pushes every change to brightness,
+  power (`on`) and current preset. `GET /json/si` is only a safety net and for uptime: every 10 seconds
+  while the WebSocket is up, every 2 seconds when it is not. WLED is declared offline after 3 failed
+  polls in a row, not one. `GET /presets.json` is reloaded every 60 seconds (names and each segment's
+  effect id `fx`, filtered while parsing), and `GET /json/fxdata` is read once. Both back off (5s, 10s,
+  30s, then 60s) when they fail, are skipped while WLED is unreachable, and `fxdata` is abandoned after
+  3 failures (no audio markers until reboot). The DUR box counts uptime on locally between polls.
+  The first 8 defined preset IDs (ascending) become boxes 1-8.
 - **Remembered preset**: WLED reports `ps` as -1 or 0 whenever the live state isn't an exact saved
   preset (after a boot with no boot preset, or after manual changes). The firmware remembers the
   last preset chosen (button click, or WLED reporting one) in flash (`Preferences`, namespace
@@ -239,19 +255,20 @@ resolved to espressif32 7.1.3 (Arduino core 2.0.17).
   the flags field (volume / frequency reactive). Each preset's segment `fx` ids are checked against
   that table, and every box whose preset has a sound-reactive effect in any segment shows a small
   equalizer icon in its top-right corner (black on the selected box, white on the others; hidden in
-  Brightness mode and while the lights are off). Limits: a playlist preset (no `seg`) is not
+  Brightness mode and while the lights are off). If `fxdata` can't be read after 3 tries the markers are skipped until the next reboot. Limits: a playlist preset (no `seg`) is not
   followed, and the marker says the effect *can* react to sound, not that the AudioReactive usermod is enabled.
 - **Button**: a short press is acted on at release (so a long press cannot also fire a click). It applies
   the next preset with `POST /json/state {"ps": id}`; a 4 second hold sends `{"on":true/false}`. The
   polled preset, brightness and power state are ignored for 2.5 seconds afterwards so the green box doesn't flicker back. In Brightness mode it
-  sends `POST /json/state {"bri": n}` (32, 64, 96, 128, 159, 191, 223, 255) with the same holdoff.
+  sends `POST /json/state {"bri": n}` with the raw level for the box (`BRI_LEVEL_LIST`) and the same holdoff.
   The PRESET/PRE: and BRIGHT/BR: texts are drawn in code over the background, so the background
   image can have those labels removed or left in.
 - **Peek ring**: WLED's HTTP `/json/live` is not enabled on this controller (returns
   `{"error":4}`), so the firmware uses the WebSocket live view like the WLED app does:
-  connect to `ws://<ip>/ws`, send `{"lv":true}`, and receive binary frames
+  connect to `ws://<ip>/ws`, send `{"lv":true}` (and `{"lv":false}` when the screen dims or WLED is off), and receive binary frames
   `'L', 1, R,G,B, R,G,B ...` (one RGB per LED on ESP32; every n-th LED on ESP8266). Frames
-  are throttled to about 15 per second.
+  are throttled to about 15 per second. WLED tracks one live-view client at a time, so opening the peek view in the
+  WLED web UI can take it from the controller (untested); the ring comes back the next time the screen dims and wakes.
 - **Ring mapping**, anticlockwise from bottom-left (thickness and mode set in `config.h`):
   bottom edge left to right = LEDs 0-124, right edge bottom to top = 125-194,
   top edge right to left = 195-319, left edge top to bottom = 320-388.
@@ -259,7 +276,7 @@ resolved to espressif32 7.1.3 (Arduino core 2.0.17).
   Reversed segments need no correction: the frame holds the colour of each physical LED.
 - **Connector animation**: while a preset is selected (and the lights are on), green dots flow from the PRE box down the
   connector line to the selected box (yellow in Brightness mode; hard-coded waypoints in `drawDotsToBox`). The screen
-  redraws at about 25fps in that state; offline it only redraws on change.
+  redraws at about 25fps in that state; otherwise it redraws on change and once a second (to keep the DUR box counting).
 - **Rendering**: the whole screen is drawn into a 320x172 sprite (static background image
   first, then dynamic elements) and pushed to the display, so there is no flicker.
 
@@ -302,6 +319,9 @@ are repainted over the background in code, so the image's own copies of them don
 | `python -m serial.tools.miniterm` crashes with ClearCommError | Windows quirk with the S3's native USB; the chip resets and the port drops. Use on-screen status instead |
 | Brightness jumps back to about 10% on every preset click | The presets have a saved brightness. In WLED edit each preset, untick "Include brightness" and save (or remove the top-level `"bri"` from `presets.json`) |
 | No box selected after a reboot | WLED reports `ps` -1 after a brightness change or boot. The firmware shows the last chosen preset (kept in flash) as selected; click once to set it. See `LAST_PRESET_SOLID` |
+| Screen flips between offline and online | A dropped request used to flip it. It now takes `OFFLINE_AFTER_FAILS` (3) failed polls in a row; if it still flaps, check WiFi signal at the controller and WLED's load (see the serial log: `WLED offline` / `WLED online`) |
+| WLED turns itself off after a while | `AUTO_OFF_MS` (3 hours on, by default). Set it to 0 to disable |
+| Build is slow at "Scanning dependencies..." | Libraries and build output must live in the `pio_work` Docker volume, not the Windows folder (`build.cmd` does this). First build after `docker volume rm pio_work` is a full rebuild |
 | `docker: error during connect ... dockerDesktopLinuxEngine` | Docker Desktop is not running. Start it and wait for the engine, check `docker info` |
 | `pip.exe` / `gcc.exe` "Access is denied" | Managed-laptop policy blocks unsigned executables; use the Docker workflow |
 
